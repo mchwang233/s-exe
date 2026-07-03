@@ -1,0 +1,9 @@
+{"vcs1":{"timestamp_begin":1782987632.842937597, "rt":7.97, "ut":6.07, "st":0.45}}
+{"vcselab":{"timestamp_begin":1782987640.894488585, "rt":2.17, "ut":0.12, "st":0.07}}
+{"link":{"timestamp_begin":1782987643.127158673, "rt":0.53, "ut":0.40, "st":0.14}}
+{"SNPS_VCS_INTERNAL_ROOT_START_TIME": 1782987632.266897481}
+{"VCS_COMP_START_TIME": 1782987632.266897481}
+{"VCS_COMP_END_TIME": 1782987643.742234559}
+{"VCS_USER_OPTIONS": "-Mdir=/home/vncer/prj/ssv/sim/output/baseline/build -Mlib=/home/vncer/prj/ssv/sim/output/baseline/build -o /home/vncer/prj/ssv/sim/output/baseline/simv -l /home/vncer/prj/ssv/sim/output/baseline/logs/vcs.log -full64 -sverilog +v2k -f $PROJ_ROOT/tb/filelist.f -uvm +vcs+lic+wait -kdb -CFLAGS -DVCS -CFLAGS -I/workspace/eda/synopsys/vcs/W-2024.09/etc/uvm-1.2/dpi /workspace/eda/synopsys/vcs/W-2024.09/etc/uvm-1.2/dpi/uvm_dpi.cc"}
+{"vcs1": {"peak_mem": 552480}}
+{"vcselab": {"peak_mem": 280764}}

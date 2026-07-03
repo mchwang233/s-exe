@@ -1,0 +1,42 @@
+#!/bin/bash
+# =============================================================================
+# sourceme - EDA environment setup for the ssv verification template
+#
+# Usage: source this before running any ssv command:
+#   source sourceme
+#   sexe build                # any directory works
+# Or one-liner: source sourceme && sexe build
+#
+# All paths are anchored to this sourceme's own location → VCS / UVM / license
+# / PATH are all edited in one place; run_case.py / sexe no longer hardcode
+# these paths.
+# =============================================================================
+
+# Auto-locate sourceme's own directory (supports both `source sourceme` and
+# `source /abs/path/sourceme`).
+_SSVDIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+if [ -z "$_SSVDIR" ]; then
+    echo "[sourceme] WARN: cannot determine own directory, edit paths manually" >&2
+    _SSVDIR="$PWD"
+fi
+
+# VCS install path (edit to match your environment)
+export VCS_HOME=/workspace/eda/synopsys/vcs/W-2024.09
+# UVM 1.2 (bundled with VCS, version locked to VCS)
+export UVM_HOME=$VCS_HOME/etc/uvm-1.2
+# License server / file
+export LM_LICENSE_FILE=/workspace/eda/synopsys/scl2025.03-sp2/Synopsys.lic
+
+# Add VCS bin + tools/bin to PATH (vlogan/vcs + sexe)
+export PATH=$VCS_HOME/bin:$_SSVDIR/tools/bin:$PATH
+
+# Simple sanity check + echo
+if [ ! -x "$VCS_HOME/bin/vcs" ]; then
+    echo "[sourceme] WARN: \$VCS_HOME/bin/vcs not found at $VCS_HOME/bin/vcs" >&2
+    echo "[sourceme]         edit sourceme to set correct path" >&2
+fi
+
+echo "[sourceme] VCS_HOME=$VCS_HOME"
+echo "[sourceme] UVM_HOME=$UVM_HOME"
+echo "[sourceme] LM_LICENSE_FILE=$LM_LICENSE_FILE"
+echo "[sourceme] PATH includes $_SSVDIR/tools/bin (for sexe)"
