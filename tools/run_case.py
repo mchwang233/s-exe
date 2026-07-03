@@ -79,6 +79,7 @@ import dataclasses
 import fnmatch
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -87,6 +88,39 @@ from typing import Dict, List
 
 
 # ----------------------------- .cmd file reader (recursive inc:) -----------------------------
+
+def _strip_inline_comment(s: str) -> str:
+    """Strip '#' / '//' comments outside of string literals.
+
+    Mirrors cfg2sv._strip_inline_comment: handles both whole-line comments
+    (returns "") and inline trailing comments (truncates + rstrip). '#' /
+    '//' inside "..." string literals are preserved as data.
+
+    Examples:
+        "# whole line"                            -> ""
+        "  // whole line   "                      -> ""
+        'ssv_cfg: FOO = "hi" # trailing'          -> 'ssv_cfg: FOO = "hi"'
+        'ssv_cfg: ENV_NAME = "x #y"'              -> 'ssv_cfg: ENV_NAME = "x #y"'
+    """
+    in_s = False
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if in_s:
+            if ch == '"' and (i == 0 or s[i-1] != '\\'):
+                in_s = False
+            i += 1
+            continue
+        if ch == '"':
+            in_s = True
+            i += 1
+            continue
+        if ch == '#':
+            return s[:i].rstrip()
+        if ch == '/' and i + 1 < len(s) and s[i+1] == '/':
+            return s[:i].rstrip()
+        i += 1
+    return s
 
 @dataclasses.dataclass
 class CmdLine:
@@ -117,6 +151,12 @@ def read_cmd_with_includes(cmd_path: Path, proj_root: Path, _seen: set = None) -
 
     out: List[CmdLine] = []
     for line_no, raw in enumerate(cmd_path.read_text(encoding='utf-8').splitlines(), 1):
+        # Strip inline '#' / '//' comments (outside string literals) so
+        # trailing comments like 'simv: +UVM_TESTNAME=t # debug' don't leak
+        # into the value. Whole-line comments collapse to "". The src_line
+        # / src_path on each CmdLine still point at the original file /
+        # line for error reporting.
+        raw = _strip_inline_comment(raw)
         s = raw.strip()
         if s.startswith("inc:"):
             inc_path_str = s[len("inc:"):].strip()
@@ -145,12 +185,21 @@ def collect_prefixed(lines: List[CmdLine], prefix: str) -> List[str]:
     continuation -- the parser stays simple and .cmd stays readable).
     The function is agnostic to whether a line came from the main .cmd or
     from an inc:'d .cmd.
+
+    Empty payloads (e.g. 'simv:' with no arg) are SKIPPED. Previously an
+    empty `simv:` appended '' to the simv command line, an empty `break:`
+    produced '+kdb_stop=', and (the dangerous one) an empty `binary:`
+    silently fell back to <proj_root>/sim/simv via resolve_simv_arg --
+    overriding the default --baseline without warning. Skipping empties
+    here fixes all of them; users see normal defaulting instead.
     """
     out: List[str] = []
     for cl in lines:
         s = cl.text.strip()
         if s.startswith(prefix):
-            out.append(s[len(prefix):].strip())
+            payload = s[len(prefix):].strip()
+            if payload:
+                out.append(payload)
     return out
 
 
@@ -205,7 +254,14 @@ def _load_all_cmd_paths(all_cmd_path: Path, root_name: str) -> List[str]:
     return candidates
 
 
+# Array-index paths (e.g. "MY_DYN_ARR[0]") contain '[' but are NOT globs;
+# they are a dynamic-array element write handled by the SV side. Detect
+# them so we don't fire a false-positive "glob matched 0 candidates" warning.
+_ARRAY_IDX_RX = re.compile(r'.+\[\d+\]\s*$')
+
 def _has_glob(s: str) -> bool:
+    if _ARRAY_IDX_RX.match(s):
+        return False
     return any(c in s for c in "*?[")
 
 

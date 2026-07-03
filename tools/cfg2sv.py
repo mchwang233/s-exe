@@ -139,11 +139,39 @@ def _array_or_scalar_default(ftype: str) -> str:
     return _SIMPLE_TYPE_DEFAULT.get(base, "0")
 
 def _strip_inline_comment(line: str) -> str:
-    """Strip whole-line comments starting with '#' or '//'; preserves '#'
-    inside string literals."""
-    s = line.strip()
-    if not s or s.startswith('#') or s.startswith('//'):
-        return ""
+    """Strip '#' / '//' comments outside of string literals.
+
+    Handles both whole-line comments (returns "") and inline trailing
+    comments (truncates at the comment marker, then rstrip). '#' and '//'
+    inside "..." string literals are preserved as data.
+
+    Examples:
+        "# whole line"                            -> ""
+        "  // whole line   "                      -> ""
+        "int :: A = 5; # trailing comment"        -> "int :: A = 5;"
+        'string :: A = "hello #world";'          -> 'string :: A = "hello #world";'
+        'string :: A = "// not a comment";'       -> 'string :: A = "// not a comment";'
+    """
+    in_s = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if in_s:
+            # Inside a string literal: only an unescaped '"' exits the
+            # literal. Don't treat '#' / '//' inside the literal as comments.
+            if ch == '"' and (i == 0 or line[i-1] != '\\'):
+                in_s = False
+            i += 1
+            continue
+        if ch == '"':
+            in_s = True
+            i += 1
+            continue
+        if ch == '#':
+            return line[:i].rstrip()
+        if ch == '/' and i + 1 < len(line) and line[i+1] == '/':
+            return line[:i].rstrip()
+        i += 1
     return line
 
 def _split_top_type(full_type: str) -> str:
@@ -196,7 +224,11 @@ def _cfg_line_iter(path: Path, _active: Set[Path]):
         raise SyntaxError(f"{path}: circular @ include: {abs_path}")
     _active.add(abs_path)
     try:
-        text = path.read_text(encoding='utf-8')
+        # Use utf-8-sig so a leading BOM (Excel / some Windows editors) is
+        # stripped automatically. Without this, the BOM gets glued onto the
+        # first token of the first line, breaking class-block detection and
+        # surfacing as a cryptic IndexError.
+        text = path.read_text(encoding='utf-8-sig')
         line_idx = 0
         for raw in text.split('\n'):
             line_idx += 1
@@ -287,7 +319,11 @@ def parse_cfg(path: Path, *, require_top_class: bool = True,
         # kind == 'line'
         _, raw, src_path, line_idx = tok
 
-        # Whole-line comment check.
+        # Strip inline '#' / '//' comments (outside string literals) BEFORE
+        # tokenizing, so trailing comments like 'int :: A = 5; # note' don't
+        # leak into the value field. The whole-line comment check below is
+        # preserved so blank-after-strip lines are skipped cleanly.
+        raw = _strip_inline_comment(raw)
         stripped = raw.strip()
         if not stripped or stripped.startswith('#') or stripped.startswith('//'):
             continue
@@ -394,44 +430,127 @@ def parse_cfg(path: Path, *, require_top_class: bool = True,
         # The first token is one of:
         #   "class_name {"               syntax 1: top-level class
         #   "class_name inst_name {"     syntax 2: sub-object instantiation
+        #   "class_name { <fields> }"    syntax 1b: one-line top-level class
+        #   "class_name inst_name { <overrides> }"  syntax 2b: one-line sub-obj
         #   "<type> :: <NAME> [= <val>]" syntax 3: field line
         #   "}"                          syntax 4: end of current block
         #
-        # Top-level '{' starts a new block.
-        if line_tokens[-1] == '{' or ('{' in line_tokens and not any(t == '::' for t in line_tokens[:-1])):
-            # Start of a class / sub-object block.
-            # Find the position of the first '{'.
-            brace_pos = line_tokens.index('{')
-            pre_tokens = line_tokens[:brace_pos]
+        # Top-level '{' starts a new block. Two shapes:
+        #   (a) Multi-line block: line ends with '{'; body on subsequent lines.
+        #   (b) One-line block: line contains both '{' and '}'; body on the
+        #       same line, terminated by ';'. We split body_tokens on ';' to
+        #       recover individual field declarations.
+        has_open  = '{' in line_tokens
+        has_close = '}' in line_tokens
+        is_multiline_block = line_tokens[-1] == '{'
+        is_oneline_block = False
+        if has_open and has_close and not is_multiline_block:
+            # Only treat as a one-line block when pre_tokens (before '{') look
+            # like a class/subobj declaration: 1 or 2 tokens, no '::'.
+            # Otherwise the line is a field whose value happens to contain
+            # '{...}' (e.g. 'int :: A = '{1, 2, 3};') and must fall through
+            # to field-line processing.
+            open_pos = line_tokens.index('{')
+            if open_pos in (1, 2) and '::' not in line_tokens[:open_pos]:
+                is_oneline_block = True
+
+        if is_multiline_block or is_oneline_block:
+            # Extract pre-tokens (the class/subobj declaration).
+            open_pos = line_tokens.index('{')
+            if is_oneline_block:
+                # Find the LAST '}' on the line as the closing brace (one-line
+                # blocks have no nesting).
+                close_pos = len(line_tokens) - 1 - line_tokens[::-1].index('}')
+                pre_tokens   = line_tokens[:open_pos]
+                body_tokens  = line_tokens[open_pos+1:close_pos]
+                post_tokens  = line_tokens[close_pos+1:]
+            else:
+                brace_pos    = open_pos
+                pre_tokens   = line_tokens[:brace_pos]
+                body_tokens  = None
+                post_tokens  = []
+
             if len(pre_tokens) == 1:
-                # Top-level class or sub-object whose class is being defined
-                # inline (the latter is not allowed -- nested class definition).
+                # Top-level class declaration.
                 block_name = pre_tokens[0]
                 if stack and isinstance(stack[-1][1], ClassDecl):
                     # stack top is ClassDecl -- we're inside a class and
                     # trying to open another class block. Not allowed.
-                    parent = stack[-1][1]  # ClassDecl or SubObjDecl
-                    sub = SubObjDecl(class_name=block_name, inst_name="", overrides=[])
-                    # The sub-object syntax is "<class_name> <inst_name> {";
-                    # pre_tokens must therefore be 2 tokens. If we got here
-                    # with 1 token + '{', treat it as a nested class def.
                     raise SyntaxError(
                         f"{src_path}:{line_idx}: nested class definition is not"
                         f" allowed; use '<class_name> <inst_name> {{'")
-                else:
-                    # Top-level class.
-                    if decl is not None:
-                        raise SyntaxError(f"{src_path}:{line_idx}: multiple top-level class blocks")
-                    decl = ClassDecl(name=block_name, source_file=str(path))
-                    stack.append(("class", decl))
+                if decl is not None:
+                    raise SyntaxError(f"{src_path}:{line_idx}: multiple top-level class blocks")
+                decl = ClassDecl(name=block_name, source_file=str(path))
+                stack.append(("class", decl))
             elif len(pre_tokens) == 2 and stack and isinstance(stack[-1][1], ClassDecl):
-                # Sub-object instantiation: <class_name> <inst_name> {
+                # Sub-object instantiation: <class_name> <inst_name> { ... }
                 parent: ClassDecl = stack[-1][1]
                 sub = SubObjDecl(class_name=pre_tokens[0], inst_name=pre_tokens[1])
                 parent.sub_objects.append(sub)
                 stack.append(("subobj", sub))
             else:
                 raise SyntaxError(f"{src_path}:{line_idx}: invalid block start: {' '.join(pre_tokens)}")
+
+            # For one-line blocks, process the inline body as field lines
+            # and close the block on the same line.
+            if is_oneline_block:
+                if post_tokens:
+                    raise SyntaxError(
+                        f"{src_path}:{line_idx}: extra tokens after closing"
+                        f" '}}': {' '.join(post_tokens)}")
+                # Split the flat body_tokens list on ';' to recover
+                # individual field declarations. (The tokenizer already
+                # isolated ';' as its own punct token.)
+                chunks: List[List[str]] = []
+                cur: List[str] = []
+                for t in body_tokens:
+                    if t == ';':
+                        if cur:
+                            chunks.append(cur)
+                        cur = []
+                    else:
+                        cur.append(t)
+                if cur:
+                    chunks.append(cur)
+                for field_tokens in chunks:
+                    if not field_tokens:
+                        continue
+                    if '::' not in field_tokens:
+                        raise SyntaxError(
+                            f"{src_path}:{line_idx}: inline block body"
+                            f" missing '::': {' '.join(field_tokens)}")
+                    colon_pos = field_tokens.index('::')
+                    type_tokens = field_tokens[:colon_pos]
+                    rest_tokens = field_tokens[colon_pos+1:]
+                    if not type_tokens or not rest_tokens:
+                        raise SyntaxError(f"{src_path}:{line_idx}: field syntax error")
+                    ftype = _split_top_type(" ".join(type_tokens))
+                    name = rest_tokens[0]
+                    value_tokens = rest_tokens[1:]
+                    if value_tokens and value_tokens[0] == '=':
+                        value_tokens = value_tokens[1:]
+                    value = _clean_value(" ".join(value_tokens))
+                    if not value:
+                        value = _array_or_scalar_default(ftype)
+                    field = FieldDecl(ftype=ftype, name=name, value=value)
+                    if not stack:
+                        raise SyntaxError(
+                            f"{src_path}:{line_idx}: field outside any block"
+                            f" (one-line block body)")
+                    top_kind, top_obj = stack[-1]
+                    if top_kind == "class" and isinstance(top_obj, ClassDecl):
+                        top_obj.fields.append(field)
+                    elif top_kind == "subobj" and isinstance(top_obj, SubObjDecl):
+                        top_obj.overrides.append(field)
+                    else:
+                        raise SyntaxError(
+                            f"{src_path}:{line_idx}: field outside any block")
+                # Close the one-line block immediately.
+                if not stack:
+                    raise SyntaxError(
+                        f"{src_path}:{line_idx}: unmatched '}}' (close > open)")
+                stack.pop()
             continue
 
         if line_tokens == ['}']:
@@ -444,6 +563,11 @@ def parse_cfg(path: Path, *, require_top_class: bool = True,
         # Inside a SubObjDecl, only field overrides are allowed.
         # Inside a ClassDecl, field declarations + sub-object instantiations
         # (already handled above) are allowed.
+        if not stack:
+            raise SyntaxError(
+                f"{src_path}:{line_idx}: field declaration outside any class"
+                f" block (wrap in '<class_name> {{ ... }}' or use"
+                f" '@./other.cfg' to pull in a class)")
         top_kind, top_obj = stack[-1]
         if top_kind == "class" and isinstance(top_obj, ClassDecl) and '::' in line_tokens:
             colon_pos = line_tokens.index('::')
