@@ -14,11 +14,17 @@
 vlogan: -full64 -sverilog +v2k
 vlogan: -f $PROJ_ROOT/tb/filelist.f
 
-vcs: -uvm +vcs+lic+wait
+vcs: +vcs+lic+wait
 vcs: -kdb
 vcs: -CFLAGS -DVCS
 vcs: -CFLAGS -I$UVM_HOME/dpi
 vcs: $UVM_HOME/dpi/uvm_dpi.cc
+vcs: -debug_access
+vcs: -timescale=1ns/10ps
+vcs: -l vcs.log
+
+simv: -l simv.log
+simv: -ucli -do $PROJ_ROOT/sim/dofile/wave.do +fsdbfile+wave.fsdb
 
 # Pre-compile: generate gen/*.sv + all.cmd from cfg/*.cfg
 precomp: python3 tools/cfg2sv.py

@@ -335,6 +335,29 @@ def build_cfg_info(sources: List[CmdLine], all_cmd: Path, root_name: str,
 
 # ----------------------------- simv path resolution -----------------------------
 
+def read_variant_simv_args(simv_path: Path, proj_root: Path) -> List[str]:
+    """At sim runtime, re-read sim/build/<variant>.cmd (variant derived
+    from simv_path.parent.name, e.g. 'baseline' / 'kdb') and return
+    ALL `simv:` lines. These are appended to the simv cmdline so
+    variant-level runtime flags (e.g. -ucli, -l simv.log, ...) apply
+    to every case that uses this variant.
+
+    Case .cmd's own `simv:` lines are appended AFTER these, so a
+    per-case override (e.g. `simv: -l other.log` or
+    `simv: +UVM_TESTNAME=...`) wins (VCS uses the last token of each
+    flag; for `-l` specifically the last `-l <path>` wins).
+
+    `$VAR` env-var placeholders are preserved verbatim (no Python-side
+    expansion; PROJ_ROOT etc. are in the simv subprocess env).
+    """
+    variant = simv_path.parent.name        # e.g. 'baseline' / 'kdb'
+    variant_cmd = (proj_root / "sim" / "build" / f"{variant}.cmd").resolve()
+    if not variant_cmd.is_file():
+        return []
+    sources = read_cmd_with_includes(variant_cmd, proj_root)
+    return collect_prefixed(sources, "simv:")
+
+
 def resolve_simv_arg(simv_arg: str, proj_root: Path) -> Path:
     """Resolve the path given in a 'binary:' line.
 
@@ -388,35 +411,71 @@ def build_simv(simv_path: Path, vlogan_args, vcs_args, proj_root: Path, dry_run=
     # (or this script's invoker) is expected to export it.
     sim_env.setdefault("PROJ_ROOT", str(proj_root))
 
-    # The Python side only provides output paths (-Mdir / -Mlib / -o / -l).
-    # All other compile args (flags, filelist, +incdir, uvm_dpi.cc) live in
-    # the build/<variant>.cmd under vlogan: / vcs: lines.
+    # Python only provides output paths (-Mdir / -Mlib / -o). The compile
+    # log path comes from the variant cmd's `vcs: -l <path>` line; if
+    # the variant cmd has none, fall back to logs/vcs.log under simv_dir.
+    # Tokens are passed as-is -- no Python-side expansion. PROJ_ROOT /
+    # UVM_HOME are in the vcs subprocess env so VCS can resolve them.
+    compile_log_path = str(cmd_log)
+    for va in vcs_args:
+        s = va.strip()
+        if s.startswith("-l "):
+            compile_log_path = s[3:].strip()
+            break
+        if s == "-l":
+            # bare `-l` with no path -> default
+            break
+
     output_args = [
         f"-Mdir={build_dir}", f"-Mlib={build_dir}",
         "-o", str(simv_path),
-        "-l", str(cmd_log),
+        "-l", compile_log_path,
     ]
 
-    # Split the .cmd-sourced vcs: / vlogan: lines by whitespace and expand
-    # env vars ($UVM_HOME / $PROJ_ROOT etc.). We do NOT rely on VCS
-    # implicit tokenization (which previously worked only by accident).
+    # Split the .cmd-sourced vcs: / vlogan: lines by whitespace. Tokens
+    # are passed through to `vcs` as-is -- no Python-side env var
+    # expansion. PROJ_ROOT / UVM_HOME are present in the vcs subprocess
+    # env (setup_sim_env copies os.environ, which main() pins with
+    # PROJ_ROOT), so VCS / the OS can resolve them downstream if needed.
     def _flat_args(raw_lines: List[str]) -> List[str]:
         out: List[str] = []
         for line in raw_lines:
             for tok in line.split():
-                out.append(os.path.expandvars(tok))
+                out.append(tok)
         return out
     vcs_flat    = _flat_args(vcs_args)
     vlogan_flat = _flat_args(vlogan_args)
 
-    cmd = [str(vcs)] + output_args + vlogan_flat + vcs_flat
+    # Drop any explicit `-l` line from vcs_flat (we already injected the
+    # canonical `-l <path>` into output_args above); avoids VCS seeing
+    # two `-l` flags and silently picking one.
+    vcs_flat_no_l: List[str] = []
+    skip_next = False
+    for tok in vcs_flat:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "-l":
+            skip_next = True   # drop the path that follows
+            continue
+        vcs_flat_no_l.append(tok)
+
+    cmd = [str(vcs)] + output_args + vlogan_flat + vcs_flat_no_l
     print(f"[run_case] build: {' '.join(cmd[:8])} ... (+{len(cmd)-8} args)")
     if dry_run:
         print("  full:", " ".join(cmd))
         return 0
-    with open(cmd_log, "w") as flog:
-        r = subprocess.run(cmd, env=sim_env, cwd=str(proj_root),
-                           stdout=flog, stderr=subprocess.STDOUT)
+    # Compile log is written by VCS itself via `-l <compile_log_path>`.
+    # No Python pipe: stdout is inherited so the user sees compile
+    # progress on the terminal, and `-l` writes the same output to the
+    # configured log file.
+    #
+    # cwd=simv_dir (e.g. sim/output/baseline/), not proj_root. This way
+    # the variant cmd's `vcs: -l vcs.log` (a relative path) lands next
+    # to the simv binary instead of polluting the project root. Other
+    # paths in the variant cmd are absolute (via $PROJ_ROOT / $UVM_HOME
+    # / -Mdir / -Mlib / -o) so the cwd change does not affect them.
+    r = subprocess.run(cmd, env=sim_env, cwd=str(simv_dir))
     return r.returncode
 
 
@@ -430,6 +489,11 @@ def main():
     ap.add_argument("--out", default=None,
                     help="Override --baseline (build the simv to this path).")
     ap.add_argument("--case-name", default=None)
+    ap.add_argument("--case-run-dir", default=None,
+                    help="Override the case run dir (default: "
+                         "sim/<variant>/run/<case>/). Used by `sexe regress` "
+                         "to consolidate all case outputs under one "
+                         "regress_<variant>_<time>/ directory.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--no-build", action="store_true",
                     help="Do not compile when simv is missing; just exit.")
@@ -451,6 +515,13 @@ def main():
         else:
             proj_root = Path.cwd()
     os.chdir(proj_root)
+
+    # Pin PROJ_ROOT into os.environ (override even if the caller passed
+    # something else). setup_sim_env() copies os.environ, so the
+    # simv subprocess also sees PROJ_ROOT in its env. Tokens in .cmd
+    # lines pass through Python as-is -- VCS / the OS resolves $VAR
+    # downstream using the subprocess env.
+    os.environ["PROJ_ROOT"] = str(proj_root)
 
     cmd_path = Path(args.cmd).resolve()
     if not cmd_path.exists():
@@ -534,9 +605,16 @@ def main():
     if args.build_only or args.dry_run:
         return
 
-    # === Prepare the case run dir: sim/<variant>/run/<case>/
-    case_run_dir = simv_path.parent / "run" / case_name
+    # === Prepare the case run dir.
+    # Default: sim/<variant>/run/<case>/.
+    # Override via --case-run-dir (used by `sexe regress` to consolidate
+    # per-case outputs under a single regress_<variant>_<time>/ dir).
+    if args.case_run_dir:
+        case_run_dir = Path(args.case_run_dir).resolve()
+    else:
+        case_run_dir = simv_path.parent / "run" / case_name
     case_run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[run_case] case_run_dir: {case_run_dir}")
 
     # === Generate cfg.info (Python flattens ssv_cfg: + globs)
     # Written into case_run_dir, and the simv subprocess runs with cwd =
@@ -576,13 +654,40 @@ def main():
         "+UVM_VERBOSITY=UVM_LOW",
     ]
 
+    # Append ALL of the variant cmd's `simv:` lines (variant-level runtime
+    # flags, e.g. `simv: -l simv.log` for the runtime log path,
+    # `simv: -ucli`, etc.). Case .cmd's `simv:` lines are appended
+    # AFTER these, so a per-case `simv: -l <other>` overrides the
+    # variant's `-l` (VCS uses the last `-l <path>`).
+    # Tokens DO get expandvars'd here -- unlike compile-time `vcs:` /
+    # `vlogan:` flags (which VCS itself handles via its own env), VCS
+    # does NOT expand env vars in simv runtime args like `-do
+    # $PROJ_ROOT/...`. PROJ_ROOT is pinned in os.environ by main() so
+    # the expansion here is reliable.
+    variant_simv_args = read_variant_simv_args(simv_path, proj_root)
+    runtime_log_set = False
+    for line in variant_simv_args:
+        for tok in line.split():
+            run_cmd.append(os.path.expandvars(tok))
+        if line.lstrip().startswith("-l "):
+            runtime_log_set = True
+        print(f"[run_case] variant simv arg (from "
+              f"sim/build/{simv_path.parent.name}.cmd): {line}")
+    if not runtime_log_set:
+        run_cmd.extend(["-l", "sim.log"])
+        print(f"[run_case] no `simv: -l` in sim/build/{simv_path.parent.name}.cmd; "
+              f"defaulting to -l sim.log")
+
     # Append all simv: lines to the simv cmdline; these include
-    # +UVM_TESTNAME=... (the only way to select a testclass).
+    # +UVM_TESTNAME=... (the only way to select a testclass). Same
+    # expandvars rule as the variant simv args above: VCS does not
+    # expand $VAR in simv runtime args, so Python does it here.
     uvm_test_in_cmd = False
     for sa in simv_arg_list:
-        run_cmd.append(sa)
-        if sa.startswith("+UVM_TESTNAME="):
-            uvm_test_in_cmd = 1
+        for tok in sa.split():
+            run_cmd.append(os.path.expandvars(tok))
+            if tok.startswith("+UVM_TESTNAME="):
+                uvm_test_in_cmd = 1
         print(f"[run_case] simv arg: {sa}")
     if not uvm_test_in_cmd:
         print(f"[run_case] WARNING: cases/{case_name}.cmd did not specify"
@@ -622,37 +727,25 @@ def main():
     run_cmd.append(f"+UVM_SEED={seed_val}")
     print(f"[run_case] seed: {seed_val} (UVM_SEED={seed_val})")
 
-    run_log = case_run_dir / "sim.log"
     print(f"[run_case] run: {simv_path}")
     print(f"[run_case] run args: {' '.join(run_cmd[1:])}")
     if args.dry_run:
         return
 
-    # Write the command itself at the top of sim.log; simv stdout follows.
-    cmd_str = " ".join(run_cmd)
-    # cwd=case_run_dir, simv uses argv[0] (absolute) to find simv.daidir,
+    # cwd=case_run_dir; simv uses argv[0] (absolute) to find simv.daidir,
     # so cwd does not affect that lookup. The SV side's
-    # ssv_object::apply_overrides_in_cwd opens the relative path "cfg.info"
-    # inside case_run_dir.
+    # ssv_object::apply_overrides_in_cwd opens the relative path
+    # "cfg.info" inside case_run_dir.
     run_cwd = case_run_dir
     run_env = setup_sim_env()
-    # Stream-read simv's stdout and write it directly to sim.log rather
-    # than letting PIPE buffer fill up; a full PIPE will block the child
-    # process's writes, causing the dreaded "hang at 0% progress".
-    import subprocess as _sp
-    with open(run_log, "w") as flog:
-        flog.write(f"Command: {cmd_str}\n\n")
-        flog.flush()
-        with _sp.Popen(run_cmd, env=run_env, cwd=str(run_cwd),
-                       stdout=_sp.PIPE, stderr=_sp.STDOUT, bufsize=0) as proc:
-            # Read+write in chunks to keep the pipe from filling up.
-            while True:
-                chunk = proc.stdout.read(4096)
-                if not chunk:
-                    break
-                flog.write(chunk.decode("utf-8", errors="replace"))
-                flog.flush()
-            r = _sp.CompletedProcess(args=run_cmd, returncode=proc.wait())
+
+    # VCS's native `-l <file>` writes the simulation log to <file> --
+    # the log file is owned by VCS, run_case.py does not write to it.
+    # stdout/stderr are NOT redirected to DEVNULL: the user wants to
+    # see sim progress on the terminal in real time. Inheriting
+    # stdout/stderr is the subprocess default (no PIPE, no Python in
+    # the loop -- just the OS passing bytes from simv to the tty).
+    r = subprocess.run(run_cmd, env=run_env, cwd=str(run_cwd))
 
     # === Post-simulation hook (cwd=case run dir; failure only logs,
     # does not change rc)

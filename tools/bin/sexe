@@ -7,7 +7,9 @@ Usage (Python-style options):
                                           # sets VCS_HOME / UVM_HOME / LM_LICENSE_FILE
     sexe build [--variant NAME]           # build the simv (default variant=baseline)
     sexe run --case CASE [--variant NAME] # run a case (default variant=baseline)
-    sexe regress --cases CASE1 CASE2 ... [--variant NAME]
+    sexe regress --cases CASE1 CASE2 ... [--variant NAME] [--parallel N]
+                          # run cases in parallel; outputs go to
+                          # sim/output/regress_<variant>_<YYYYMMDD_HHMMSS>/<case>/
     sexe list-builds                      # list all variants under sim/build/
     sexe gen [--file CFG]                 # manually run cfg2sv.py (normally unnecessary:
                                           #   sexe build's precomp hook does it)
@@ -113,28 +115,77 @@ def cmd_run(args) -> int:
             return rc
 
     print(f"[sexe] run case {case} (simv={simv_bin})")
-    return subprocess.run(
-        ["python3", str(PROJECT_ROOT / "tools" / "run_case.py"), str(case_cmd),
-         "--baseline", str(simv_bin)],
-        cwd=str(PROJECT_ROOT),
-    ).returncode
+    cmd = ["python3", str(PROJECT_ROOT / "tools" / "run_case.py"), str(case_cmd),
+           "--baseline", str(simv_bin)]
+    if getattr(args, "case_run_dir", None):
+        cmd.extend(["--case-run-dir", args.case_run_dir])
+    return subprocess.run(cmd, cwd=str(PROJECT_ROOT)).returncode
 
 
 def cmd_regress(args) -> int:
+    import time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     cases = args.cases
     build = args.variant
+    parallel = getattr(args, "parallel", None)
+
+    # Consolidate all case outputs under one directory:
+    #   sim/output/regress_<variant>_<YYYYMMDD_HHMMSS>/<case>/
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    regress_dir = OUTPUT_DIR / f"regress_{build}_{timestamp}"
+    regress_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[sexe] regress dir: {regress_dir}")
+    print(f"[sexe] cases ({len(cases)}): {', '.join(cases)}")
+
+    if parallel is None or parallel <= 0:
+        parallel = min(len(cases), 8)
+    print(f"[sexe] parallel workers: {parallel}")
+
+    def run_one(case: str):
+        case_dir = regress_dir / case
+        case_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            sys.executable, __file__, "run",
+            "--case", case, "--variant", build,
+            "--case-run-dir", str(case_dir),
+        ]
+        t0 = time.time()
+        rc = subprocess.run(cmd, cwd=str(PROJECT_ROOT)).returncode
+        dt = time.time() - t0
+        return case, rc, case_dir, dt
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
+        futures = {pool.submit(run_one, c): c for c in cases}
+        for fut in as_completed(futures):
+            case, rc, case_dir, dt = fut.result()
+            results[case] = (rc, case_dir, dt)
+
+    # Summary (in original case order so output is deterministic)
+    print(f"\n=== regress summary ({len(cases)} cases, dir={regress_dir}) ===")
     failed = []
-    for i, c in enumerate(cases, 1):
-        print(f"\n=== [{i}/{len(cases)}] case: {c} ===")
-        rc = subprocess.run(
-            [sys.executable, __file__, "run", "--case", c, "--variant", build],
-            cwd=str(PROJECT_ROOT),
-        ).returncode
+    for c in cases:
+        rc, cdir, dt = results[c]
+        status = "PASS" if rc == 0 else f"FAIL (rc={rc})"
+        print(f"  [{status}] {c:<30s} {dt:6.1f}s  {cdir}")
         if rc != 0:
             failed.append((c, rc))
+
+    # Write regress.log (per-case summary)
+    log_path = regress_dir / "regress.log"
+    with open(log_path, "w") as flog:
+        flog.write(f"regress: variant={build} ts={timestamp} cases={len(cases)}\n")
+        flog.write(f"dir: {regress_dir}\n\n")
+        for c in cases:
+            rc, cdir, dt = results[c]
+            flog.write(f"[{'PASS' if rc == 0 else 'FAIL'}] {c} rc={rc} dt={dt:.1f}s {cdir}\n")
+    print(f"[sexe] regress.log: {log_path}")
+
     if failed:
-        print(f"\nFAILED cases: {failed}")
+        print(f"\nFAILED: {len(failed)} cases")
         return 1
+    print(f"\nAll {len(cases)} cases PASSED.")
     return 0
 
 
@@ -184,13 +235,19 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Case name (may include a sub-directory, e.g. sub/foo).")
     p_run.add_argument("--variant", default="baseline",
                       help="Variant name (default: baseline).")
+    p_run.add_argument("--case-run-dir", default=None,
+                      help="Override the case run dir "
+                           "(default: sim/<variant>/run/<case>/). "
+                           "Used by `sexe regress`.")
 
     # regress --cases CASE1 CASE2 ... [--variant NAME]
-    p_regress = sub.add_parser("regress", help="Run a batch of cases in sequence.")
+    p_regress = sub.add_parser("regress", help="Run a batch of cases in parallel under one regress dir.")
     p_regress.add_argument("--cases", required=True, nargs="+",
                           help="Case name list (space-separated).")
     p_regress.add_argument("--variant", default="baseline",
                           help="Variant name (default: baseline).")
+    p_regress.add_argument("--parallel", type=int, default=None,
+                          help="Max parallel simv processes (default: min(num_cases, 8)).")
 
     sub.add_parser("list-builds", help="List all variants under sim/build/.")
     p_gen = sub.add_parser("gen",

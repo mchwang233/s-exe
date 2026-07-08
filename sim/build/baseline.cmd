@@ -30,12 +30,17 @@
 vlogan: -full64 -sverilog +v2k
 vlogan: -f $PROJ_ROOT/tb/filelist.f
 
-vcs: -uvm +vcs+lic+wait
+vcs: +vcs+lic+wait
 vcs: -kdb
 vcs: -CFLAGS -DVCS
 vcs: -CFLAGS -I$UVM_HOME/dpi
 vcs: $UVM_HOME/dpi/uvm_dpi.cc
 
+simv: -l simv.log
+
+vcs: -l vcs.log
+
 # Pre-compile: generate gen/*.sv + all.cmd from cfg/*.cfg
 # (cwd=proj_root; cfg2sv.py uses paths relative to its own location, no args needed)
 precomp: python3 tools/cfg2sv.py
+

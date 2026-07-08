@@ -17,6 +17,8 @@ precomp: echo "[precomp] $(date +%H:%M:%S) cwd=$(pwd) variant=baseline" > /tmp/h
 # Pre-sim hook (cwd=case run dir): write a marker file for postsim to verify
 presim:  echo "[presim] $(date +%H:%M:%S) cfg.info_in_cwd=$([ -f cfg.info ] && echo yes || echo no)"
 
-# Post-sim hook (cwd=case run dir): check sim.log exists + any UVM_FATAL
-postsim: echo "[postsim] $(date +%H:%M:%S) sim.log=$([ -f sim.log ] && echo yes || echo no) | fatal=$(grep -c UVM_FATAL sim.log 2>/dev/null || echo 0)"
+# Post-sim hook (cwd=case run dir): check simv.log exists + any UVM_FATAL
+# (file name `simv.log` comes from the variant cmd's `simv: -l simv.log`;
+# if you change it there, also update this check).
+postsim: echo "[postsim] $(date +%H:%M:%S) simv.log=$([ -f simv.log ] && echo yes || echo no) | fatal=$(grep -c UVM_FATAL simv.log 2>/dev/null || echo 0)"
 postsim: cat /tmp/hooks_demo_precomp.log 2>/dev/null && rm -f /tmp/hooks_demo_precomp.log

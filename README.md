@@ -44,11 +44,33 @@ ssv/
 
 ```
 vlogan:        <args>        # compile-time flags (build only, optional)
-vcs:           <args>        # compile-time flags (build only, optional)
+vcs:           <args>        # compile-time flags (build only, optional).
+                            # A `vcs: -l <file>` line writes the
+                            # COMPILE log to <file>; both `<file>` and
+                            # the relative-to-simv-dir resolution are
+                            # yours. vcs is invoked with cwd = simv's
+                            # own dir, so a relative `-l vcs.log` lands
+                            # next to the simv binary.
+simv:          <arg>         # runtime: append <arg> to the simv command
+                            # line (one arg per line). This is the
+                            # **only** way to pick a testclass (no
+                            # defaulting allowed):
+                            #   e.g.: simv: +UVM_TESTNAME=my_long_test
+                            # A `simv: -l <file>` line writes the
+                            # SIMULATION log to <file> via VCS's native
+                            # `-l`; cwd=case run dir, so a relative
+                            # `-l simv.log` lands in
+                            # sim/<variant>/run/<case>/.
+                            #
+                            # Two scopes:
+                            #   - in cases/<x>.cmd:  case-specific flags
+                            #     (testclass, ucli dofile, ...)
+                            #   - in sim/build/<v>.cmd:  variant-level
+                            #     defaults; read at runtime and appended
+                            #     BEFORE the case cmd's `simv:` lines.
+                            #     For `-l` specifically, the case cmd's
+                            #     line overrides (VCS uses the last one).
 binary:        <path>        # runtime: pick which simv binary (path relative to sim/, optional)
-simv:          <arg>         # runtime: appended to the simv command line (one arg per line).
-                            # This is the **only** way to pick a testclass (no defaulting allowed):
-                            # e.g.: simv: +UVM_TESTNAME=my_long_test
 ssv_cfg:       <path> = <val>
                             # runtime cfg override: Python reads this and writes it into cfg.info.
                             # Exact path: kept as-is. If the path contains * / ? / [, Python uses
@@ -180,6 +202,7 @@ sexe run --case <yourcase> # run any case, reusing the same simv
 - EDA toolchain: `VCS_HOME=/workspace/eda/synopsys/vcs/W-2024.09`, `UVM_HOME=$VCS_HOME/etc/uvm-1.2`, `LM_LICENSE_FILE=/workspace/eda/synopsys/scl2025.03-sp2/Synopsys.lic`
 - VCS W-2024 + UVM 1.2 runtime scheduler hangs at `uvm.uvm_sched.pre_reset` without `-kdb`, so both baseline.cmd / kdb.cmd include `-kdb`
 - The simv process's cwd is set to the case run dir by run_case.py; VCS uses argv[0] (absolute path) to find simv.daidir, so cwd does not affect daidir lookup
+- `vcs` is invoked with cwd = `sim/<variant>/` (not proj_root) so the variant cmd's `vcs: -l vcs.log` lands next to the simv binary. All paths in `tb/filelist.f` use `$PROJ_ROOT` to be cwd-agnostic.
 - SV `substr(start, end)` is inclusive on both indices; to compare a prefix you must use `substr(0, prefix.len()-1)`
 - Numeric field overrides: decimal numbers / `0` / `1` / `1'b0` / `1'b1`; other literals are written as cfg defaults
 - Packed vector array/scalar assignment goes through `ssv_ato_packed` (`tools/cfg2sv.py` + `ssv_object.sv`), not relying on UVM `*_hext` macros (UVM 1.2 has no such macros)

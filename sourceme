@@ -13,12 +13,16 @@
 # =============================================================================
 
 # Auto-locate sourceme's own directory (supports both `source sourceme` and
-# `source /abs/path/sourceme`).
-_SSVDIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
-if [ -z "$_SSVDIR" ]; then
+# `source /abs/path/sourceme`). PROJ_ROOT is the canonical project-root
+# env var used everywhere else in this project (.cmd files, filelist.f,
+# run_case.py); pinning it here means every .cmd can write
+# `$PROJ_ROOT/...` and it just works.
+PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+if [ -z "$PROJ_ROOT" ]; then
     echo "[sourceme] WARN: cannot determine own directory, edit paths manually" >&2
-    _SSVDIR="$PWD"
+    PROJ_ROOT="$PWD"
 fi
+export PROJ_ROOT
 
 # VCS install path (edit to match your environment)
 export VCS_HOME=/workspace/eda/synopsys/vcs/W-2024.09
@@ -28,7 +32,7 @@ export UVM_HOME=$VCS_HOME/etc/uvm-1.2
 export LM_LICENSE_FILE=/workspace/eda/synopsys/scl2025.03-sp2/Synopsys.lic
 
 # Add VCS bin + tools/bin to PATH (vlogan/vcs + sexe)
-export PATH=$VCS_HOME/bin:$_SSVDIR/tools/bin:$PATH
+export PATH=$VCS_HOME/bin:$PROJ_ROOT/tools/bin:$PATH
 
 # Simple sanity check + echo
 if [ ! -x "$VCS_HOME/bin/vcs" ]; then
@@ -39,4 +43,5 @@ fi
 echo "[sourceme] VCS_HOME=$VCS_HOME"
 echo "[sourceme] UVM_HOME=$UVM_HOME"
 echo "[sourceme] LM_LICENSE_FILE=$LM_LICENSE_FILE"
-echo "[sourceme] PATH includes $_SSVDIR/tools/bin (for sexe)"
+echo "[sourceme] PROJ_ROOT=$PROJ_ROOT"
+echo "[sourceme] PATH includes $PROJ_ROOT/tools/bin (for sexe)"
