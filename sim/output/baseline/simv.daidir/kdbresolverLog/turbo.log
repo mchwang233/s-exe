@@ -1,3 +1,0 @@
-Command Line: /workspace/eda/synopsys/vcs/W-2024.09/linux64/bin/elabcom -simflow -KDBRESOLVER -simvdaidir /home/vncer/prj/ssv/sim/output/baseline/simv.daidir -saveLevel -q -logdir /home/vncer/prj/ssv/sim/output/baseline/simv.daidir/kdbresolverLog
-uname(Linux eda-server 5.14.0-687.17.1.el9_8.x86_64 #1 SMP PREEMPT_DYNAMIC Wed Jun 24 13:43:37 UTC 2026 x86_64)
-au time 0.171445 0.147530 0.024915 delta 110358528 110358528 total 342712320 342712320
