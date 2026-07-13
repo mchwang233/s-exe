@@ -1,5 +1,7 @@
 # ssv - The core of UVM verification environment parameter passing (copyable)
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 **Core idea (4 steps)**:
 
 1. Write the parameter source of truth in `.cfg` (e.g. `top.cfg`, `sub_agent.cfg`). `cfg2sv.py` generates `cfg/<class>.sv` (paired with the .cfg in the same directory) as classes `extends ssv_object`, and also generates `cfg/ssv_cfg_pkg.sv` and `cfg/all.cmd`.
@@ -39,6 +41,61 @@ ssv/
 │           └── sim.log     <- case simulation log
 └── (no gen/ — cfg+sv live in the same dir, so the whole tree is easy to copy to another project)
 ```
+
+**`.cfg` file syntax**:
+
+Each `.cfg` file defines at most one top-level class. A field uses `::` as the
+type/name separator (not `:`, so packed ranges such as `bit [7:0]` remain
+unambiguous). Semicolons and commas at the end of a value are optional.
+
+```text
+# or // comment; trailing comments are also allowed outside string literals
+
+@./sub_agent.cfg                  # include a standalone cfg class (top level only)
+
+ssv_root_cfg {                    # <class_name> { ... }
+  int unsigned :: NUM_AGENTS = 2; # <type> :: <field> [= <SV literal>]
+  bit [7:0]    :: MASK       = 'hff;
+  string       :: ENV_NAME   = "demo #1";  # # inside quotes is data
+  real         :: PERIOD_NS;               # omitted value defaults to 0.0
+  int[]        :: COUNTERS   = '{1, 2, 3}; # dynamic array
+  string[$]    :: NAMES;                   # queue
+
+  sub_agent_cfg agent_a {          # <class_name> <instance_name> { ... }
+    int    :: AGENT_ID = 0;         # overrides fields of the referenced class
+    string :: NAME     = "agent_a";
+  }
+}
+```
+
+Grammar summary:
+
+```text
+cfg-file       := { include } class-block
+include        := "@" path                         # outside class blocks only
+class-block    := class-name "{" { field | sub-object } "}"
+sub-object     := class-name instance-name "{" { field } "}"
+field          := type "::" field-name [ "=" value ] [ ";" | "," ]
+```
+
+- Supported scalar types include `int`, `int unsigned`/`uint`, `bit`,
+  `logic`, `byte`, `shortint`, `longint`, `real`, `string`, and packed
+  `bit [...]` / `logic [...]`. Append `[]` for a dynamic array or `[$]` for
+  a queue.
+- A missing value defaults to `0` for integer-like types, `1'b0` for
+  `bit`/`logic`, `0.0` for `real`, `""` for `string`, and the SystemVerilog
+  empty assignment pattern for arrays/queues.
+- A file may contain one top-level class. Nested class definitions are not
+  allowed; a two-name block is a sub-object instance. The referenced class
+  may come from another discovered `.cfg` file or an `@` include.
+- A whole class or sub-object may also be written on one line, with fields
+  separated by semicolons, for example
+  `sub_agent_cfg { int :: ID = 0; bit :: ENABLE = 1'b1; }`.
+- `#` and `//` start whole-line or trailing comments outside double-quoted
+  strings. String literals preserve those characters.
+- `@` accepts an absolute path or a path relative to the current `.cfg`;
+  `$VAR` and `${VAR}` are expanded. Includes may be nested, but cycles are
+  errors. Included classes remain independent and are not field-merged.
 
 **`.cmd` file syntax**:
 
@@ -85,7 +142,30 @@ postsim:       <shell cmd>   # post-sim hook (cwd=case run dir, bash, multiple l
 seed:         <int|random>  # UVM random seed; omit or write "random" → random (1..2^31-1).
                             # When debugging a bug, fix it with seed: 12345 for reproducibility.
                             # Maps to simv plusarg: +UVM_SEED=<int>
+inc:          <path>        # include another .cmd; path is relative to project root.
+                            # Included lines are inserted at this position; nested includes
+                            # are supported and include cycles are errors.
 ```
+
+General `.cmd` rules:
+
+- The format is line-oriented: `directive: payload`. Leading/trailing
+  whitespace is ignored, empty payloads are skipped, and there is no
+  continuation-line syntax. Unknown lines are ignored as comments.
+- `#` and `//` start whole-line or trailing comments outside double-quoted
+  strings. Directives from `inc:` files behave as if written at the include
+  location.
+- Repeat `vlogan:`, `vcs:`, `simv:`, `ssv_cfg:`, or hook directives to append
+  values in order. For `binary:` and `seed:`, the last value wins.
+- `simv:` payloads are split on whitespace (there is no shell-style quote
+  parser); environment variables are expanded before launch. Hook payloads
+  are instead executed verbatim by `/bin/bash`.
+- `ssv_cfg:` uses the first `=` as the path/value separator. The optional
+  `ssv_root_cfg.` prefix is removed. An exact path is emitted directly;
+  `*`, `?`, and `[...]` patterns are expanded case-sensitively against
+  `cfg/all.cmd`. Numeric array indices such as `[0]` are not treated as glob
+  syntax. An unmatched glob is retained so the SV side reports an unknown
+  field warning.
 
 **Glob syntax** (in the path of a `ssv_cfg:` line, expanded by Python `fnmatch`):
 
